@@ -1,6 +1,7 @@
 // Standard C headers.
 #include <dirent.h>
 #include <fcntl.h>
+#include <string.h>
 #include <unistd.h>
 
 // System C headers.
