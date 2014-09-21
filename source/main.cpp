@@ -16,6 +16,9 @@
 // OpenSSL headers.
 #include <openssl/sha.h>
 
+// Function prototypes.
+void process(const std::string&);
+
 /**
  * @brief Gets the size of a file in bytes.
  * @param[in] path Path of the file to check.
@@ -23,7 +26,7 @@
  */
 unsigned long get_file_size(const std::string& path) {
   std::ifstream file(path.c_str(), std::ios::binary | std::ios::ate);
-  return (unsigned long)(file.tellg());
+  return unsigned(long(file.tellg()));
 }
 
 /**
@@ -31,12 +34,12 @@ unsigned long get_file_size(const std::string& path) {
  * @param[in] str String to convert to hex.
  * @returns A string of hexadecimal characters.
  */
-std::string convert_to_hex(const std::string& str) {
+std::string convert_to_hex(const unsigned char* str, const unsigned int length) {
   static const char* hex = "0123456789ABCDEF";
   std::ostringstream ss;
-  for(unsigned long i = 0; i < str.length(); ++i) {
+  for(unsigned long i = 0; i < length; ++i) {
     // Gets the character.
-    const char c = str[i];
+    const unsigned char c = str[i];
 
     // Computes the nibbles.
     const unsigned char high_nibble = (c & 0xF0) >> 4;
@@ -53,60 +56,105 @@ std::string convert_to_hex(const std::string& str) {
  * @brief Gets the SHA1 hash of a file.
  */
 std::string file_hash(const std::string& path) {
-  unsigned char hash[SHA_DIGEST_LENGTH];
-  ::memset(hash, SHA_DIGEST_LENGTH, 0);
+  static unsigned char hash[SHA_DIGEST_LENGTH];
+  ::memset(hash, 0, SHA_DIGEST_LENGTH);
 
   unsigned long length = get_file_size(path);
-  int fd = ::open(path.c_str(), O_RDONLY);
+  if(length > 0) {
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if(fd > 0) {
+      // Map the file into memory.
+      void* data = ::mmap(nullptr, length, PROT_READ, MAP_FILE | MAP_SHARED, fd, 0);
+      if(data) {
+        // Use OpenSSL to generate a SHA1 hash for the mapped file.
+        ::SHA1(reinterpret_cast<const unsigned char*>(data), length, hash);
 
-  // Map the file into memory.
-  void* base = ::mmap(nullptr, length, PROT_READ, MAP_FILE | MAP_SHARED, fd, 0);
-  if(base) {
-    // Use OpenSSL to generate a SHA1 hash for the mapped file.
-    ::SHA1(reinterpret_cast<const unsigned char*>(base), length, hash);
+        // Unmap the file.
+        ::munmap(data, length);
+      }
 
-    // Unmap the file.
-    ::munmap(base, length);
+      else {
+        std::cerr << "* Error (" << errno << ") when mapping file: " << path << std::endl;
+      }
+
+      // Close the file.
+      ::close(fd);
+    }
+
+    else {
+      std::cerr << "* Error (" << errno << ") when opening file: " << path << std::endl;
+    }
   }
-
-  else {
-    std::cerr << "* Error (" << errno << ") when mapping file: " << path << std::endl;
-  }
-
-  // Close the file.
-  ::close(fd);
 
   // Return the hash as a hex string.
-  return convert_to_hex(std::string(reinterpret_cast<const char*>(hash), SHA_DIGEST_LENGTH));
+  return convert_to_hex(hash, SHA_DIGEST_LENGTH);
+}
+
+/**
+ * @brief Processes an individual file.
+ * @param[in] path Path of file.
+ */
+void process_file(const std::string& path) {
+  std::cout << file_hash(path) << " " << path << std::endl;
+}
+
+/**
+ * @brief Returns whether the path is a directory.
+ * @param[in] path Path to check.
+ * @returns `true` if the path is a directory; otherwise `false`.
+ */
+bool is_directory(const std::string& path) {
+  struct stat st;
+  ::lstat(path.c_str(), &st);
+  return S_ISDIR(st.st_mode);
+}
+
+/**
+ * @brief Returns whether the path is a regular file.
+ * @param[in] path Path to check.
+ * @returns `true` if the path is a regular file; otherwise `false`.
+ */
+bool is_file(const std::string& path) {
+  struct stat st;
+  ::lstat(path.c_str(), &st);
+  return S_ISREG(st.st_mode);
 }
 
 /**
  * @brief Processes all files recursively found under a directory.
  * @param[in] path Path to recurse.
- * @param[in] func Function to invoke on each file found under the directory.
  */
-void process_file(const std::string& path, std::function<void(std::string)> func) {
-  struct stat st;
-  lstat(path.c_str(), &st);
-  if(S_ISDIR(st.st_mode)) {
-    DIR* dir = opendir(path.c_str());
-    if(dir == nullptr) {
-      std::cerr << "* Error (" << errno << ") when opening directory: " << path << std::endl;
-      return;
-    }
-    struct dirent* entry = nullptr;
-    while((entry = readdir(dir)) != nullptr) {
-      std::string sub_dir(entry->d_name);
-      if(sub_dir != "." && sub_dir != "..") {
-        std::ostringstream new_path;
-        new_path << path << "/" << sub_dir;
-        process_file(new_path.str(), func);
-      }
-    }
-    closedir(dir);
+void process_directory(const std::string& path) {
+  DIR* dir = ::opendir(path.c_str());
+  if(dir == nullptr) {
+    std::cerr << "* Error (" << errno << ") when opening directory: " << path << std::endl;
+    return;
   }
-  else {
-    func(path);
+
+  struct dirent* entry = nullptr;
+  while((entry = ::readdir(dir)) != nullptr) {
+    std::string sub_dir(entry->d_name);
+
+    // Don't process the "." and ".." directories.
+    if(sub_dir != "." && sub_dir != "..") {
+      // Concatinate the path.
+      std::ostringstream new_path;
+      new_path << path << "/" << sub_dir;
+
+      // Process the path.
+      process(new_path.str());
+    }
+  }
+
+  ::closedir(dir);
+}
+
+void process(const std::string& path) {
+  if(is_directory(path)) {
+    process_directory(path);
+  }
+  else if(is_file(path)) {
+    process_file(path);
   }
 }
 
@@ -119,9 +167,6 @@ void process_file(const std::string& path, std::function<void(std::string)> func
  */
 int main(int argc, char** argv) {
   (void)(argc);
-  (void)(argv);
-  process_file(argv[1], [](const std::string& path) {
-    std::cout << file_hash(path) << " " << path << std::endl;
-  });
+  process(argv[1]);
   return 0;
 }
